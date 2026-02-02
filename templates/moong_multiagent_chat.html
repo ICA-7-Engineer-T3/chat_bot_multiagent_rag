@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>뭉이 멀티에이전트 챗봇</title>
+  <style>
+    :root {
+      --bg: #0f0f14;
+      --surface: #1a1a22;
+      --border: #2a2a36;
+      --text: #e8e8ed;
+      --text-muted: #8888a0;
+      --accent: #7c6ef6;
+      --accent-dim: #5a4dc9;
+      --user-msg: #2d2d3a;
+      --bot-msg: #252530;
+      --success: #4ade80;
+      --reject: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .persona-select {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .persona-select label { color: var(--text-muted); font-size: 0.9rem; }
+    .persona-select select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .persona-select select:focus { outline: none; border-color: var(--accent); }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 0;
+      min-height: 0;
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+    }
+    .chat-panel {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--border);
+      min-height: 0;
+    }
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--accent-dim);
+      color: var(--text);
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--bot-msg);
+      border: 1px solid var(--border);
+    }
+    .msg .role-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .chat-input-area {
+      padding: 12px 16px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .chat-input-area textarea {
+      flex: 1;
+      min-height: 128px;
+      max-height: 320px;
+      padding: 10px 14px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 0.95rem;
+      resize: none;
+      font-family: inherit;
+    }
+    .chat-input-area textarea::placeholder { color: var(--text-muted); }
+    .chat-input-area textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .chat-input-area button {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-send {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-send:hover { background: var(--accent-dim); }
+    .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-reset {
+      background: var(--border);
+      color: var(--text-muted);
+    }
+    .btn-reset:hover { background: #3a3a48; color: var(--text); }
+    .analysis-panel {
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      min-height: 0;
+      overflow: hidden;
+    }
+    .analysis-panel h2 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .analysis-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .agent-block {
+      margin-bottom: 8px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    .agent-block summary {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 0.9rem;
+      color: var(--accent);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .agent-block summary::-webkit-details-marker { display: none; }
+    .agent-block summary::after { content: '▼'; font-size: 0.7rem; color: var(--text-muted); }
+    .agent-block[open] summary::after { content: '▲'; }
+    .agent-block .body {
+      padding: 12px 14px;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      border-top: 1px solid var(--border);
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .agent-block .body.empty { color: var(--text-muted); font-style: italic; }
+    .analyzer-body { display: flex; flex-direction: column; gap: 10px; }
+    .analyzer-rag { font-size: 0.8rem; color: var(--text-muted); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .analyzer-rag .rag-title { font-weight: 600; color: var(--accent); margin-bottom: 4px; }
+    .analyzer-rag .rag-section { margin-bottom: 6px; }
+    .analyzer-output { white-space: pre-wrap; }
+    .writer-body .iteration-block { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    .writer-body .iteration-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+    .writer-body .iteration-num { font-size: 0.75rem; color: var(--accent); margin-bottom: 4px; }
+    .guardrail-body .iteration-block { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .guardrail-body .iteration-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+    .guardrail-body .iteration-num { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 2px; }
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .status-badge.approve { background: rgba(74, 222, 128, 0.2); color: var(--success); }
+    .status-badge.reject { background: rgba(248, 113, 113, 0.2); color: var(--reject); }
+    .empty-state {
+      padding: 24px 16px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    .loading { opacity: 0.7; pointer-events: none; }
+    .api-key-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 15, 20, 0.95);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .api-key-overlay.hidden { display: none; }
+    .api-key-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 32px;
+      max-width: 420px;
+      width: 90%;
+    }
+    .api-key-box h2 {
+      margin: 0 0 8px 0;
+      font-size: 1.1rem;
+      color: var(--accent);
+    }
+    .api-key-box p {
+      margin: 0 0 16px 0;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+    .api-key-box input {
+      width: 100%;
+      padding: 12px 14px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 0.95rem;
+      box-sizing: border-box;
+    }
+    .api-key-box input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .api-key-box input::placeholder { color: var(--text-muted); }
+    .api-key-box .btn-wrap {
+      margin-top: 16px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .api-key-box button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    .api-key-box button:hover { background: var(--accent-dim); }
+    .api-key-box button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .api-key-error { margin-top: 10px; font-size: 0.85rem; color: var(--reject); }
+  </style>
+</head>
+<body>
+  <div class="api-key-overlay" id="apiKeyOverlay">
+    <div class="api-key-box">
+      <h2>Gemini API 키 입력</h2>
+      <p>챗봇을 사용하려면 Google Gemini API 키를 입력해주세요.</p>
+      <input type="password" id="apiKeyInput" placeholder="API 키를 입력하세요" autocomplete="off" />
+      <div class="api-key-error hidden" id="apiKeyError"></div>
+      <div class="btn-wrap">
+        <button type="button" id="apiKeySubmit">확인</button>
+      </div>
+    </div>
+  </div>
+  <header>
+    <h1>🐕 뭉이 멀티에이전트 챗봇</h1>
+    <div class="persona-select">
+      <label for="persona">페르소나</label>
+      <select id="persona">
+        <option value="pet">뭉이 (펫)</option>
+        <option value="mate" selected>뭉 (메이트)</option>
+        <option value="guide">뭉 (가이드)</option>
+      </select>
+    </div>
+  </header>
+  <main>
+    <div class="chat-panel">
+      <div class="chat-messages" id="chatMessages">
+        <div class="empty-state" id="emptyState">메시지를 입력하고 전송하면 뭉이가 답해줘요. 페르소나를 바꿔 보세요.</div>
+      </div>
+      <div class="chat-input-area">
+        <textarea id="messageInput" placeholder="메시지 입력..." rows="4"></textarea>
+        <button type="button" class="btn-reset" id="btnReset">대화 초기화</button>
+        <button type="button" class="btn-send" id="btnSend">전송</button>
+      </div>
+    </div>
+    <div class="analysis-panel">
+      <h2>📋 에이전트 분석 결과 (마지막 턴)</h2>
+      <div class="analysis-content" id="analysisContent">
+        <div class="empty-state" id="analysisEmpty">채팅을 한 번 보내면 Scanner, Memory, Writer, Guardrail 결과가 여기 표시됩니다.</div>
+        <div id="agentBlocks" style="display: none;">
+          <div class="agent-block">
+            <summary>Moong-Scanner (감정/의도 분석)</summary>
+            <div class="body analyzer-body">
+              <div class="analyzer-rag" id="analyzerRag"></div>
+              <div class="analyzer-output-wrap">
+                <span class="rag-title">Scanner 분석 결과</span>
+                <div class="analyzer-output" id="agentAnalyzer" data-key="analyzer_output"></div>
+              </div>
+            </div>
+          </div>
+          <div class="agent-block">
+            <summary>Moong-Memory (기억/맥락)</summary>
+            <div class="body" id="agentMemory" data-key="memory_context"></div>
+          </div>
+          <div class="agent-block">
+            <summary>Persona-Selector (선택 페르소나)</summary>
+            <div class="body" id="agentSelector" data-key="selected_persona"></div>
+          </div>
+          <div class="agent-block">
+            <summary>Writer (답변 초안)</summary>
+            <div class="body writer-body" id="agentWriter"></div>
+          </div>
+          <div class="agent-block">
+            <summary>Moong-Guardrail (검수)</summary>
+            <div class="body" id="agentGuardrail"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script>
+    const chatMessages = document.getElementById('chatMessages');
+    const emptyState = document.getElementById('emptyState');
+    const messageInput = document.getElementById('messageInput');
+    const btnSend = document.getElementById('btnSend');
+    const btnReset = document.getElementById('btnReset');
+    const personaSelect = document.getElementById('persona');
+    const analysisContent = document.getElementById('analysisContent');
+    const analysisEmpty = document.getElementById('analysisEmpty');
+    const agentBlocks = document.getElementById('agentBlocks');
+
+    function escapeHtml(s) {
+      if (s == null) return '';
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function renderMessages(conversation) {
+      if (!conversation || conversation.length === 0) {
+        emptyState.style.display = 'block';
+        return;
+      }
+      emptyState.style.display = 'none';
+      chatMessages.querySelectorAll('.msg').forEach(el => el.remove());
+      conversation.forEach(turn => {
+        const div = document.createElement('div');
+        div.className = 'msg ' + (turn.role === 'user' ? 'user' : 'assistant');
+        const label = turn.role === 'user' ? '나' : '뭉이';
+        div.innerHTML = '<div class="role-label">' + escapeHtml(label) + '</div>' + escapeHtml(turn.content);
+        chatMessages.appendChild(div);
+      });
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    var RAG_LEVEL_LABEL = { middle: '중분류', low: '세부', high: '상위' };
+    function formatRag(rag) {
+      if (!rag || typeof rag !== 'object') return '';
+      const parts = [];
+      if (rag.emotion_summary && typeof rag.emotion_summary === 'object') {
+        const lines = [];
+        for (const [level, summary] of Object.entries(rag.emotion_summary)) {
+          if (summary) lines.push((RAG_LEVEL_LABEL[level] || level) + ': ' + summary);
+        }
+        if (lines.length) parts.push('[감정 요약]\n' + lines.join('\n'));
+      }
+      if (rag.primary_emotions && typeof rag.primary_emotions === 'object') {
+        const lines = [];
+        for (const [level, emos] of Object.entries(rag.primary_emotions)) {
+          if (Array.isArray(emos) && emos.length) lines.push((RAG_LEVEL_LABEL[level] || level) + ': ' + emos.join(', '));
+        }
+        if (lines.length) parts.push('[주요 감정]\n' + lines.join('\n'));
+      }
+      if (rag.similar_situations && Array.isArray(rag.similar_situations) && rag.similar_situations.length) {
+        parts.push('[유사 상황]\n' + rag.similar_situations.slice(0, 3).map(function(s) { return '· ' + s; }).join('\n'));
+      }
+      return parts.length ? parts.join('\n\n') : '';
+    }
+
+    function renderAgentResult(data) {
+      if (!data || Object.keys(data).length === 0) {
+        analysisEmpty.style.display = 'block';
+        agentBlocks.style.display = 'none';
+        return;
+      }
+      analysisEmpty.style.display = 'none';
+      agentBlocks.style.display = 'block';
+
+      var ragEl = document.getElementById('analyzerRag');
+      if (ragEl) {
+        var ragText = formatRag(data.analyzer_rag_result);
+        ragEl.innerHTML = ragText ? '<span class="rag-title">RAG (유사 대화 감정 분포)</span><pre class="rag-section">' + escapeHtml(ragText) + '</pre>' : '';
+      }
+
+      const keys = ['analyzer_output', 'memory_context', 'selected_persona'];
+      keys.forEach(key => {
+        const el = document.querySelector('[data-key="' + key + '"]');
+        if (el) {
+          const val = data[key];
+          el.textContent = val != null ? String(val) : '';
+          el.classList.toggle('empty', !val || String(val).trim() === '');
+        }
+      });
+
+      var writerEl = document.getElementById('agentWriter');
+      if (writerEl) {
+        var writerIters = data.writer_iterations || [];
+        if (writerIters.length > 0) {
+          writerEl.className = 'body writer-body';
+          writerEl.innerHTML = writerIters.map(function (w, i) {
+            return '<div class="iteration-block"><div class="iteration-num">반복 ' + (w.iteration || (i + 1)) + '</div><pre style="margin:0; white-space: pre-wrap;">' + escapeHtml(w.draft_answer || '') + '</pre></div>';
+          }).join('');
+        } else {
+          var draft = data.draft_answer != null ? String(data.draft_answer) : '';
+          writerEl.textContent = draft;
+          writerEl.classList.toggle('empty', !draft || !draft.trim());
+        }
+      }
+
+      var guardEl = document.getElementById('agentGuardrail');
+      if (guardEl) {
+        var guardIters = data.guardrail_iterations || [];
+        if (guardIters.length > 0) {
+          guardEl.className = 'body guardrail-body';
+          guardEl.innerHTML = guardIters.map(function (g, i) {
+            var status = g.guardrail_status || '';
+            var badgeClass = status === 'APPROVE' ? 'approve' : 'reject';
+            var fb = g.review_feedback || '';
+            return '<div class="iteration-block"><div class="iteration-num">반복 ' + (g.iteration || (i + 1)) + ' <span class="status-badge ' + badgeClass + '">' + escapeHtml(status) + '</span></div><pre style="margin:4px 0 0 0; white-space: pre-wrap; font-size: 0.85rem;">' + escapeHtml(fb) + '</pre></div>';
+          }).join('');
+        } else {
+          var status = data.guardrail_status || '';
+          var feedback = data.review_feedback || '';
+          guardEl.innerHTML = (status ? '<span class="status-badge ' + (status === 'APPROVE' ? 'approve' : 'reject') + '">' + escapeHtml(status) + '</span> ' : '') + '<pre style="margin:8px 0 0 0; white-space: pre-wrap;">' + escapeHtml(feedback) + '</pre>';
+        }
+      }
+    }
+
+    async function sendMessage() {
+      const text = messageInput.value.trim();
+      if (!text) return;
+      const persona = personaSelect.value;
+
+      btnSend.disabled = true;
+      document.body.classList.add('loading');
+
+      const userMsg = { role: 'user', content: text };
+      renderMessages([...(window._conversation || []), userMsg]);
+      messageInput.value = '';
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, persona: persona })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || '오류가 발생했습니다.');
+          return;
+        }
+        window._conversation = data.conversation || [];
+        renderMessages(window._conversation);
+        if (data.agent_result) renderAgentResult(data.agent_result);
+      } catch (e) {
+        alert('전송 실패: ' + e.message);
+      } finally {
+        btnSend.disabled = false;
+        document.body.classList.remove('loading');
+      }
+    }
+
+    async function resetChat() {
+      if (!confirm('대화를 초기화할까요?')) return;
+      try {
+        await fetch('/reset', { method: 'POST' });
+        window._conversation = [];
+        renderMessages([]);
+        renderAgentResult({});
+        analysisEmpty.style.display = 'block';
+        agentBlocks.style.display = 'none';
+      } catch (e) {
+        alert('초기화 실패: ' + e.message);
+      }
+    }
+
+    btnSend.addEventListener('click', sendMessage);
+    btnReset.addEventListener('click', resetChat);
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // API 키 설정 여부 확인 후 오버레이 표시/숨김
+    const apiKeyOverlay = document.getElementById('apiKeyOverlay');
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    const apiKeySubmit = document.getElementById('apiKeySubmit');
+    const apiKeyError = document.getElementById('apiKeyError');
+
+    function showApiKeyError(msg) {
+      apiKeyError.textContent = msg || '';
+      apiKeyError.classList.toggle('hidden', !msg);
+    }
+
+    function checkApiKeyAndShowOverlay() {
+      fetch('/config')
+        .then(r => r.json())
+        .then(data => {
+          if (data.api_key_configured) {
+            apiKeyOverlay.classList.add('hidden');
+          } else {
+            apiKeyOverlay.classList.remove('hidden');
+            apiKeyInput.value = '';
+            showApiKeyError('');
+          }
+        })
+        .catch(() => {
+          apiKeyOverlay.classList.remove('hidden');
+        });
+    }
+
+    async function submitApiKey() {
+      const key = (apiKeyInput.value || '').trim();
+      if (!key) {
+        showApiKeyError('API 키를 입력해주세요.');
+        return;
+      }
+      showApiKeyError('');
+      apiKeySubmit.disabled = true;
+      try {
+        const res = await fetch('/api-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: key })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          apiKeyOverlay.classList.add('hidden');
+        } else {
+          showApiKeyError(data.error || 'API 키 설정에 실패했습니다.');
+        }
+      } catch (e) {
+        showApiKeyError('전송 실패: ' + e.message);
+      } finally {
+        apiKeySubmit.disabled = false;
+      }
+    }
+
+    apiKeySubmit.addEventListener('click', submitApiKey);
+    apiKeyInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitApiKey();
+    });
+
+    checkApiKeyAndShowOverlay();
+
+    // 초기 대화 기록 로드 (선택)
+    fetch('/history')
+      .then(r => r.json())
+      .then(data => {
+        if (data.conversation && data.conversation.length > 0) {
+          window._conversation = data.conversation;
+          renderMessages(data.conversation);
+          if (data.last_agent_result) renderAgentResult(data.last_agent_result);
+        }
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>

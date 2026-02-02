@@ -1,0 +1,6 @@
+DBs/*.db filter=lfs diff=lfs merge=lfs -text
+DBs/*.npy filter=lfs diff=lfs merge=lfs -text
+DBs/*.faiss filter=lfs diff=lfs merge=lfs -text
+DBs/total_data.db filter=lfs diff=lfs merge=lfs -text
+DBs/faiss_embeddings.npy filter=lfs diff=lfs merge=lfs -text
+DBs/faiss_index.faiss filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,17 @@
+# RAG 데이터 (대용량, GitHub 100MB 제한 초과)
+DBs/
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
