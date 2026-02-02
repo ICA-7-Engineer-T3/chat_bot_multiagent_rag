@@ -65,28 +65,34 @@ Flask 기반 **뭉이(Moong)** 멀티에이전트 챗봇의 알고리즘 개요,
 cd c:\chat_bot_multiagent_rag
 ```
 
-### 2.3 가상환경 생성 및 활성화 (권장)
+### 2.3 (권장) conda로 가상환경 생성 및 활성화
 
-**Windows (PowerShell):**
+- Python 버전은 **3.10 이상** 권장을 참고하세요.
 
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-```
-
-**Windows (cmd):**
-
-```cmd
-python -m venv venv
-venv\Scripts\activate.bat
-```
-
-**Linux / macOS:**
+**1) conda 가상환경 생성**
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+conda create -n moong-chatbot python=3.10
 ```
+
+**2) 가상환경 활성화**
+
+```bash
+conda activate moong-chatbot
+```
+
+**3) requirements.txt로 패키지 설치**
+
+```bash
+pip install -r requirements.txt
+```
+
+> ⚠️ conda 환경에서는 `requirements.txt`의 모든 패키지가 pip로 설치됨을 확인하세요. 만약 특정 패키지(faiss 등) 설치 시 오류가 날 경우, [faiss 공식 conda 패키지](https://anaconda.org/conda-forge/faiss-cpu) 등을 먼저 설치해 주세요:
+> 
+> ```bash
+> conda install -c conda-forge faiss-cpu
+> pip install -r requirements.txt
+> ```
 
 ### 2.4 패키지 설치
 
@@ -94,40 +100,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2.5 환경 변수 (선택)
-
-| 변수명 | 설명 | 기본값 |
-|--------|------|--------|
-| `GEMINI_API_KEY` | Gemini API 키 (설정 시 앱 시작 시 자동 초기화) | (없으면 웹에서 입력) |
-| `FLASK_SECRET_KEY` | Flask 세션 암호화용 | `moong-multiagent-secret-change-in-production` |
-| `MOONG_DB_PATH` | 대화 DB SQLite 파일 경로 | `DBs/total_data.db` (프로젝트 기준 상대 경로) |
-| `MOONG_EMBEDDINGS_PATH` | 임베딩 `.npy` 파일 경로 | `DBs/faiss_embeddings.npy` |
-| `MOONG_FAISS_INDEX_PATH` | FAISS 인덱스 `.faiss` 파일 경로 | `DBs/faiss_index.faiss` |
-
+### 2.5 환경 변수
 - **기본 동작**: 위 세 경로는 **설정하지 않으면** `main.py`가 있는 디렉터리 기준 **`DBs/`** 폴더를 참조합니다. `DBs` 안에 `total_data.db`, `faiss_embeddings.npy`, `faiss_index.faiss`를 두면 별도 설정 없이 동작합니다.
-- **다른 경로를 쓰고 싶을 때만** 아래처럼 환경 변수로 덮어쓰면 됩니다.
 
-**Windows (PowerShell, 현재 세션):**
+    **⚠️ 반드시 아래 구글 드라이브 링크에서 `DBs/total_data.db`, `DBs/faiss_embeddings.npy`, `DBs/faiss_index.faiss` 3개 파일을 직접 다운로드하여 프로젝트 루트의 `DBs` 폴더에 동일한 경로로 넣어야 챗봇이 정상 동작합니다. (필수!)**
 
-```powershell
-$env:GEMINI_API_KEY = "여기에_API_키"
-# DB/임베딩/인덱스를 다른 위치에 둔 경우에만:
-# $env:MOONG_DB_PATH = "C:\data\total_data.db"
-# $env:MOONG_EMBEDDINGS_PATH = "C:\data\faiss_embeddings.npy"
-# $env:MOONG_FAISS_INDEX_PATH = "C:\data\faiss_index.faiss"
-```
-
-**Linux / macOS:**
-
-```bash
-export GEMINI_API_KEY="여기에_API_키"
-# DB/임베딩/인덱스를 다른 위치에 둔 경우에만:
-# export MOONG_DB_PATH="/path/to/total_data.db"
-# export MOONG_EMBEDDINGS_PATH="/path/to/faiss_embeddings.npy"
-# export MOONG_FAISS_INDEX_PATH="/path/to/faiss_index.faiss"
-```
-
-- `GEMINI_API_KEY`를 넣지 않으면, 실행 후 웹 UI에서 API 키를 입력해야 챗봇이 동작합니다.
+    [구글 드라이브 링크](https://drive.google.com/drive/folders/1NzStTWnWqYXXVd7RBsS4cn1SO6chQ8Pj?usp=sharing)
 
 ---
 
@@ -149,7 +127,7 @@ python main.py
 - 페르소나(mate / guide / pet) 선택 후 메시지를 보내면, Analyzer·Memory·Writer·Guardrail 등 에이전트 결과를 GUI에서 확인할 수 있습니다.
 
 ### 3.3 API 키 없이 실행했을 때
-
+- `GEMINI_API_KEY`를 넣지 않으면, 실행 후 웹 UI에서 API 키를 입력해야 챗봇이 동작합니다.
 - 서버는 정상 기동되며, 웹에서 API 키를 입력하면 그 시점에 LLM·워크플로가 초기화됩니다.
 - DB/FAISS/임베딩은 **첫 채팅 시** 또는 API 키 설정 시 한 번만 로드됩니다.
 
