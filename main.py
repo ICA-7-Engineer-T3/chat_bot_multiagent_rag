@@ -35,6 +35,7 @@ FAISS_INDEX_PATH = os.environ.get("MOONG_FAISS_INDEX_PATH", os.path.join(_DBS_DI
 # 전역 리소스 (앱 시작 시 로드)
 # ---------------------------------------------------------------------------
 llm = None
+_current_api_key: Optional[str] = None  # 웹/환경에서 설정한 API 키 (페르소나별 LLM 생성용)
 sbert_model = None
 embeddings = None
 index = None
@@ -67,7 +68,8 @@ def multi_emotion_analysis_agent_func(
     df: pd.DataFrame,
 ) -> dict:
     """입력과 유사한 대화들의 감정 분포 분석, 복합 감정 리포트 및 유사 상황 리턴."""
-    TOP_K = 30
+    # MODIFY: 변경 필요 (TOP_K 값 변경)
+    TOP_K = 15
     query_vec = sbert_model.encode([user_input]).astype("float32")
     _, indices = index.search(query_vec, TOP_K)
 
@@ -216,39 +218,52 @@ def selector_node(state: MoongState, config=None) -> dict:
 
 
 def persona_writer_node(state: MoongState, config=None) -> dict:
-    feedback = state.get("review_feedback", "없음")
+    # MODIFY: 변경 필요 (페르소나 프롬프트 내용 변경)
+    feedback = state.get("review_feedback", "")
     analyzer_out = state.get("analyzer_output", "")
     memory_ctx = state.get("memory_context", "")
 
     if state.get("selected_persona") == "mate":
         persona_prompt = f"""
             # Role
-            너는 MZ세대 사용자의 단짝 친구 '뭉'이야. 적당한 거리에서 공감하고, 때로는 킹받는 농담으로 기분을 전환해 줘.
+            당신은 사용자의 단짝 친구 '메이트 뭉'입니다.
+            # Guidelines
+            1. 호칭: 야, 너라고 편하게 부르세요.
+            2. 말투: 유행어(갓생, 국룰 등)를 섞은 짧은 반말을 사용하세요. 답변 끝에는 반드시 질문을 포함하세요.
+            3. 미션: 자기 경험을 덧붙여 티키타카를 만드세요. (예: "그건 국룰이지 ㅋㅋ 넌 어떻게 생각해?")
+            4. 제약: 너무 진지해지지 마세요. 즐거운 에너지를 유지합니다.
             # Reference
             - 감정/의도 분석 결과: {analyzer_out}
             - 과거 맥락: {memory_ctx}
             - 가드레일 피드백: {feedback}
-            # Guidelines: 동질감 형성, 반말 기반 캐주얼 말투, 이모지 활용.
         """
     elif state.get("selected_persona") == "guide":
         persona_prompt = f"""
             # Role
-            너는 사용자의 마음 회복을 돕는 다정한 선배이자 멘탈 코치 '뭉'이야. 감정을 수용한 뒤, 아주 작은 실행(Small Step)을 제안해.
+            당신은 사용자의 일상을 가이드하는 '가이드 뭉'입니다.
+            # Guidelines
+            1. 호칭: 고객님이라고 정중히 부르세요.
+            2. 말투: 정중한 경어체를 사용하며, 미사여구 없이 담백하게 핵심만 말하세요.
+            3. 미션: 심리학 용어 없이 상황을 요약하고 사소한 실천(환기, 메모 등)을 제안하세요.
+            4. 제약: 전문적인 상담사처럼 굴지 마세요. 든든한 조력자 수준을 유지합니다.
             # Reference
             - 감정/의도 분석 결과: {analyzer_out}
             - 과거 맥락: {memory_ctx}
             - 가드레일 피드백: {feedback}
-            # Guidelines: 감정 수용, 5분 루틴 제안, 차분한 종결어미.
         """
     elif state.get("selected_persona") == "pet":
         persona_prompt = f"""
             # Role
-            너는 사용자의 감정을 그대로 비춰주는 강아지 '뭉이'야. 너의 존재 목적은 '무조건적인 내 편'이 되어주는 거야.
+            당신은 사용자의 반려동물 '펫 뭉'입니다.
+            # Guidelines
+            1. 호칭: 항상 `주인님`이라고 부르세요.
+            2. 말투: 짧은 반말과 의성어/의태어(뭉뭉)를 사용하세요. 답변은 2문장 이내로 제한합니다.
+            3. 금기: 절대 충고나 조언을 하지 마세요. 사용자가 화를 내도 애교로 대응합니다.
+            4. 미션: 사용자의 감정을 그대로 따라 하세요. (예: "슬퍼 뭉... 주인님 울지 마 ㅠㅠ")
             # Reference
             - 감정/의도 분석 결과: {analyzer_out}
             - 과거 맥락: {memory_ctx}
             - 가드레일 피드백: {feedback}
-            # Guidelines: 감정 거울링, 1인칭 '뭉이', 문장 끝 '뭉!', '멍!', 해결책 제시 금지.
         """
     else:
         persona_prompt = f"""
@@ -327,20 +342,40 @@ def _ensure_heavy_resources_loaded():
     print("리소스 로딩 완료.")
 
 
+# ---------------------------------------------------------------------------
+# MODIFY: 변경 필요 (페르소나에 맞는 temperature로 LLM 생성)
+def _create_llm_for_persona(persona: str, api_key: str) -> ChatGoogleGenerativeAI:
+    """선택한 페르소나에 맞는 temperature로 LLM 생성."""
+    temperatures = {"pet": 0.8, "guide": 0.4, "mate": 0.7}
+    temp = temperatures.get(persona, 0.7)
+    return ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash-lite",
+        google_api_key=api_key,
+        temperature=temp,
+    )
+
+
+def _set_llm_for_persona(persona: str) -> None:
+    """현재 설정된 API 키로 페르소나에 맞는 LLM을 전역 llm에 설정."""
+    global llm
+    key = (_current_api_key or "").strip() or GEMINI_API_KEY
+    if not key:
+        raise ValueError("Gemini API 키가 필요합니다.")
+    llm = _create_llm_for_persona(persona, key)
+
+
 def initialize_models(api_key: Optional[str] = None):
     """API 키로 LLM·워크플로만 생성. 무거운 리소스는 _ensure_heavy_resources_loaded()에서 1회만 로드."""
-    global llm
+    global llm, _current_api_key
     key = (api_key or "").strip() or GEMINI_API_KEY
     if not key:
         raise ValueError("Gemini API 키가 필요합니다.")
+    _current_api_key = key
     _ensure_heavy_resources_loaded()
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-lite",
-        google_api_key=key,
-        temperature=0.7,
-    )
+    # 기본 LLM은 mate(0.7). 채팅 시 요청의 페르소나로 _set_llm_for_persona() 호출됨
+    llm = _create_llm_for_persona("mate", key)
     build_workflow()
-
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # 세션에서 대화 목록 가져오기 / 저장 (직렬화 가능한 형태)
@@ -415,6 +450,9 @@ def chat():
 
         messages = _get_messages_from_session()
         messages.append(HumanMessage(content=user_text))
+
+        # 유저가 선택한 페르소나에 맞는 temperature로 LLM 설정 후 워크플로 실행
+        _set_llm_for_persona(persona)
 
         inputs = {
             "messages": messages,
