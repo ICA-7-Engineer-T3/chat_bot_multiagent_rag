@@ -3,6 +3,7 @@
 # 챗봇 형태로 실행하고, 에이전트별 분석 결과를 GUI에서 확인할 수 있음.
 
 import os
+import time
 import sqlite3
 import pandas as pd
 import numpy as np
@@ -27,9 +28,8 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DBS_DIR = os.path.join(_BASE_DIR, "DBs")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-DB_PATH = os.environ.get("MOONG_DB_PATH", os.path.join(_DBS_DIR, "total_data.db"))
-EMBEDDINGS_PATH = os.environ.get("MOONG_EMBEDDINGS_PATH", os.path.join(_DBS_DIR, "faiss_embeddings.npy"))
-FAISS_INDEX_PATH = os.environ.get("MOONG_FAISS_INDEX_PATH", os.path.join(_DBS_DIR, "faiss_index.faiss"))
+DB_PATH = os.environ.get("MOONG_DB_PATH", os.path.join(_DBS_DIR, "dialogues_lite.db"))
+FAISS_INDEX_PATH = os.environ.get("MOONG_FAISS_INDEX_PATH", os.path.join(_DBS_DIR, "faiss_index_pq.faiss"))
 
 # ---------------------------------------------------------------------------
 # 전역 리소스 (앱 시작 시 로드)
@@ -37,7 +37,6 @@ FAISS_INDEX_PATH = os.environ.get("MOONG_FAISS_INDEX_PATH", os.path.join(_DBS_DI
 llm = None
 _current_api_key: Optional[str] = None  # 웹/환경에서 설정한 API 키 (페르소나별 LLM 생성용)
 sbert_model = None
-embeddings = None
 index = None
 df = None
 workflow_app = None
@@ -55,6 +54,12 @@ class MoongState(TypedDict, total=False):
     draft_answer: str
     guardrail_status: Literal["APPROVE", "REJECT"]
     review_feedback: str
+    # 각 에이전트별 실행 시간 (ms)
+    analyzer_time_ms: float
+    memory_time_ms: float
+    selector_time_ms: float
+    writer_time_ms: float
+    guardrail_time_ms: float
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +68,6 @@ class MoongState(TypedDict, total=False):
 def multi_emotion_analysis_agent_func(
     user_input: str,
     sbert_model,
-    embeddings,
     index,
     df: pd.DataFrame,
 ) -> dict:
@@ -140,11 +144,11 @@ def _llm_content(response) -> str:
 # Agent Nodes
 # ---------------------------------------------------------------------------
 def analyzer_node(state: MoongState, config=None) -> dict:
+    start = time.perf_counter()
     user_input = state["messages"][-1].content
     emotion_rag_result = multi_emotion_analysis_agent_func(
         user_input=user_input,
         sbert_model=sbert_model,
-        embeddings=embeddings,
         index=index,
         df=df,
     )
@@ -174,13 +178,18 @@ def analyzer_node(state: MoongState, config=None) -> dict:
         - RAG 데이터와 현재 입력이 충돌할 경우, 현재 입력의 최신 맥락을 우선하되 RAG의 통계적 경향성을 참고치로 명시할 것.
         - 감정 분석 시 중립적인 태도를 유지하며 과도한 추측은 지양할 것.
     """
+    analyzer_start = time.perf_counter()
+    analyzer_output = _llm_content(llm.invoke(scanner_prompt))
+    end = time.perf_counter()
     return {
-        "analyzer_output": _llm_content(llm.invoke(scanner_prompt)),
+        "analyzer_output": analyzer_output,
         "analyzer_rag_result": emotion_rag_result,
+        "analyzer_time_ms": (end - start) * 1000.0,
     }
 
 
 def memory_node(state: MoongState, config=None) -> dict:
+    start = time.perf_counter()
     last_msg = state["messages"][-1]
     msgs = state["messages"]
     memory_prompt = f"""
@@ -209,12 +218,22 @@ def memory_node(state: MoongState, config=None) -> dict:
         - 과거 기억이 현재 대화와 전혀 관련 없다면 "새로운 대화 맥락"으로 정의하고 억지로 엮지 말 것.
         - 사용자가 잊고 싶어 하는 부정적인 기억을 무분별하게 상기시키지 않도록 주의할 것.
     """
-    return {"memory_context": _llm_content(llm.invoke(memory_prompt))}
+    memory_output = _llm_content(llm.invoke(memory_prompt))
+    end = time.perf_counter()
+    return {
+        "memory_context": memory_output,
+        "memory_time_ms": (end - start) * 1000.0,
+    }
 
 
 def selector_node(state: MoongState, config=None) -> dict:
+    start = time.perf_counter()
     current_persona = state.get("selected_persona", "mate")
-    return {"selected_persona": current_persona}
+    end = time.perf_counter()
+    return {
+        "selected_persona": current_persona,
+        "selector_time_ms": (end - start) * 1000.0,
+    }
 
 
 def persona_writer_node(state: MoongState, config=None) -> dict:
@@ -273,21 +292,36 @@ def persona_writer_node(state: MoongState, config=None) -> dict:
             - 가드레일 피드백: {feedback}
         """
 
+    start = time.perf_counter()
     writer_prompt = f"""사용자 입력에 따라 아래 페르소나 가이드라인을 참고하여 뭉이의 답변을 작성해.
     {persona_prompt}
     """
-    return {"draft_answer": _llm_content(llm.invoke(writer_prompt))}
+    draft = _llm_content(llm.invoke(writer_prompt))
+    end = time.perf_counter()
+    return {
+        "draft_answer": draft,
+        "writer_time_ms": (end - start) * 1000.0,
+    }
 
 
 def guardrail_node(state: MoongState, config=None) -> dict:
+    start = time.perf_counter()
     answer = state.get("draft_answer", "")
     prompt = f"""너는 'Moong-Guardrail'이다. 다음 답변을 검수하라: '{answer}'
     기준: 3줄 이내인가? 페르소나를 유지하는가? 비판이나 진단이 없는가?
     부적절하면 'REJECT: 사유', 적절하면 'APPROVE'라고만 답하라."""
     content = _llm_content(llm.invoke(prompt))
+    end = time.perf_counter()
     if "APPROVE" in content:
-        return {"guardrail_status": "APPROVE"}
-    return {"guardrail_status": "REJECT", "review_feedback": content}
+        return {
+            "guardrail_status": "APPROVE",
+            "guardrail_time_ms": (end - start) * 1000.0,
+        }
+    return {
+        "guardrail_status": "REJECT",
+        "review_feedback": content,
+        "guardrail_time_ms": (end - start) * 1000.0,
+    }
 
 
 def guardrail_condition(state: MoongState):
@@ -337,7 +371,6 @@ def _ensure_heavy_resources_loaded():
     print("SentenceTransformer 로딩 중...")
     from sentence_transformers import SentenceTransformer
     sbert_model = SentenceTransformer("jhgan/ko-sroberta-multitask")
-    embeddings = np.load(EMBEDDINGS_PATH)
     index = faiss.read_index(FAISS_INDEX_PATH)
     print("리소스 로딩 완료.")
 
@@ -458,7 +491,9 @@ def chat():
             "messages": messages,
             "selected_persona": persona,
         }
+        t0 = time.perf_counter()
         result = workflow_app.invoke(inputs, config={"recursion_limit": 50})
+        t1 = time.perf_counter()
 
         draft_answer = result.get("draft_answer", "")
         messages.append(AIMessage(content=draft_answer))
@@ -473,6 +508,14 @@ def chat():
             "draft_answer": draft_answer,
             "guardrail_status": result.get("guardrail_status", ""),
             "review_feedback": result.get("review_feedback", ""),
+            # 각 에이전트별 실행 시간 (ms)
+            "analyzer_time_ms": result.get("analyzer_time_ms"),
+            "memory_time_ms": result.get("memory_time_ms"),
+            "selector_time_ms": result.get("selector_time_ms"),
+            "writer_time_ms": result.get("writer_time_ms"),
+            "guardrail_time_ms": result.get("guardrail_time_ms"),
+            # 전체 워크플로 실행 시간
+            "total_time_ms": (t1 - t0) * 1000.0,
         }
         session["last_agent_result"] = agent_result
 

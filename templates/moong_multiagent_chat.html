@@ -194,6 +194,11 @@
     .agent-block summary::-webkit-details-marker { display: none; }
     .agent-block summary::after { content: '▼'; font-size: 0.7rem; color: var(--text-muted); }
     .agent-block[open] summary::after { content: '▲'; }
+    .agent-time {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-left: 8px;
+    }
     .agent-block .body {
       padding: 12px 14px;
       font-size: 0.85rem;
@@ -336,7 +341,10 @@
         <div class="empty-state" id="analysisEmpty">채팅을 한 번 보내면 Scanner, Memory, Writer, Guardrail 결과가 여기 표시됩니다.</div>
         <div id="agentBlocks" style="display: none;">
           <div class="agent-block">
-            <summary>Moong-Scanner (감정/의도 분석)</summary>
+            <summary>
+              <span>Moong-Scanner (감정/의도 분석)</span>
+              <span class="agent-time" id="timeAnalyzer"></span>
+            </summary>
             <div class="body analyzer-body">
               <div class="analyzer-rag" id="analyzerRag"></div>
               <div class="analyzer-output-wrap">
@@ -346,19 +354,31 @@
             </div>
           </div>
           <div class="agent-block">
-            <summary>Moong-Memory (기억/맥락)</summary>
+            <summary>
+              <span>Moong-Memory (기억/맥락)</span>
+              <span class="agent-time" id="timeMemory"></span>
+            </summary>
             <div class="body" id="agentMemory" data-key="memory_context"></div>
           </div>
           <div class="agent-block">
-            <summary>Persona-Selector (선택 페르소나)</summary>
+            <summary>
+              <span>Persona-Selector (선택 페르소나)</span>
+              <span class="agent-time" id="timeSelector"></span>
+            </summary>
             <div class="body" id="agentSelector" data-key="selected_persona"></div>
           </div>
           <div class="agent-block">
-            <summary>Writer (답변 초안)</summary>
+            <summary>
+              <span>Writer (답변 초안)</span>
+              <span class="agent-time" id="timeWriter"></span>
+            </summary>
             <div class="body writer-body" id="agentWriter"></div>
           </div>
           <div class="agent-block">
-            <summary>Moong-Guardrail (검수)</summary>
+            <summary>
+              <span>Moong-Guardrail (검수)</span>
+              <span class="agent-time" id="timeGuardrail"></span>
+            </summary>
             <div class="body" id="agentGuardrail"></div>
           </div>
         </div>
@@ -424,6 +444,12 @@
       return parts.length ? parts.join('\n\n') : '';
     }
 
+    function formatMs(ms) {
+      if (ms == null || isNaN(ms)) return '';
+      if (ms >= 1000) return (ms / 1000).toFixed(2) + ' s';
+      return ms.toFixed(0) + ' ms';
+    }
+
     function renderAgentResult(data) {
       if (!data || Object.keys(data).length === 0) {
         analysisEmpty.style.display = 'block';
@@ -432,6 +458,21 @@
       }
       analysisEmpty.style.display = 'none';
       agentBlocks.style.display = 'block';
+
+      // 에이전트별 실행 시간 표시
+      const timeMap = {
+        analyzer_time_ms: 'timeAnalyzer',
+        memory_time_ms: 'timeMemory',
+        selector_time_ms: 'timeSelector',
+        writer_time_ms: 'timeWriter',
+        guardrail_time_ms: 'timeGuardrail',
+      };
+      Object.keys(timeMap).forEach(key => {
+        const el = document.getElementById(timeMap[key]);
+        if (!el) return;
+        const v = data[key];
+        el.textContent = v != null ? formatMs(Number(v)) : '';
+      });
 
       var ragEl = document.getElementById('analyzerRag');
       if (ragEl) {
