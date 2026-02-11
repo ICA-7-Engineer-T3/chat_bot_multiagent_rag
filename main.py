@@ -80,7 +80,7 @@ def multi_emotion_analysis_agent_func(
 ) -> dict:
     """입력과 유사한 대화들의 감정 분포 분석 및 리포트 (최적화 버전)"""
     
-    TOP_K = 15
+    TOP_K = 30
     query_vec = sbert_model.encode([user_input]).astype('float32')
     distances, indices = index.search(query_vec, TOP_K)
 
@@ -186,7 +186,7 @@ async def analyzer_node(state: MoongState, config=None) -> dict:
 async def memory_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     last_msg = state["messages"][-1]
-    msgs = state["messages"][-6:]  
+    msgs = state["messages"][-6:]
     memory_prompt = f"""
         # Role
         당신은 사용자의 과거와 현재를 잇는 기억 관리자 'Moong-Memory'이다.

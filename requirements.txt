@@ -6,3 +6,5 @@ langchain-google-genai>=2.0.0
 langchain-core>=0.2.0
 langgraph>=0.2.0
 sentence-transformers>=2.2.0
+Flask[async]>=3.0.0
+asgiref>=3.7.0
