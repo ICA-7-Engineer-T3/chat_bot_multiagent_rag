@@ -3,7 +3,9 @@
 # 챗봇 형태로 실행하고, 에이전트별 분석 결과를 GUI에서 확인할 수 있음.
 
 import os
+import sys
 import time
+import asyncio
 import sqlite3
 import pandas as pd
 import numpy as np
@@ -14,9 +16,13 @@ from typing import Annotated, List, Literal, Optional, TypedDict
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph.message import add_messages
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 
 from flask import Flask, render_template, request, jsonify, session
+
+# 윈도우에서 비동기 동작 시 필수 설정
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "moong-multiagent-secret-change-in-production")
@@ -51,6 +57,7 @@ class MoongState(TypedDict, total=False):
     analyzer_rag_result: dict
     memory_context: str
     selected_persona: str
+    selected_persona_prompt: str
     draft_answer: str
     guardrail_status: Literal["APPROVE", "REJECT"]
     review_feedback: str
@@ -71,53 +78,42 @@ def multi_emotion_analysis_agent_func(
     index,
     df: pd.DataFrame,
 ) -> dict:
-    """입력과 유사한 대화들의 감정 분포 분석, 복합 감정 리포트 및 유사 상황 리턴."""
-    # MODIFY: 변경 필요 (TOP_K 값 변경)
+    """입력과 유사한 대화들의 감정 분포 분석 및 리포트 (최적화 버전)"""
+    
     TOP_K = 15
-    query_vec = sbert_model.encode([user_input]).astype("float32")
-    _, indices = index.search(query_vec, TOP_K)
+    query_vec = sbert_model.encode([user_input]).astype('float32')
+    distances, indices = index.search(query_vec, TOP_K)
 
     found_middle_emotions = []
     found_low_emotions = []
     found_high_emotions = []
     found_single_turn_texts = []
     for i in indices[0]:
-        if 0 <= i < len(df):
-            row = df.iloc[i]
-            middle = row["emotion_middle_class"]
-            low = row["emotion_low_class"]
-            high = row["emotion_high_class"]
-            single_turn = row["sing_turn_text"]
-            found_middle_emotions.append(
-                middle if pd.notnull(middle) and str(middle).strip() != "" else "_없음"
-            )
-            found_low_emotions.append(
-                low if pd.notnull(low) and str(low).strip() != "" else "_없음"
-            )
-            found_high_emotions.append(
-                high if pd.notnull(high) and str(high).strip() != "" else "_없음"
-            )
-            found_single_turn_texts.append(
-                single_turn if pd.notnull(single_turn) else ""
-            )
+        if i >= 0 and i < len(df):
+            middle = df.iloc[i]['emotion_middle_class']
+            low = df.iloc[i]['emotion_low_class']
+            high = df.iloc[i]['emotion_high_class']
+            found_middle_emotions.append(middle if pd.notnull(middle) and str(middle).strip() != "" else "_없음")
+            found_low_emotions.append(low if pd.notnull(low) and str(low).strip() != "" else "_없음")
+            found_high_emotions.append(high if pd.notnull(high) and str(high).strip() != "" else "_없음")
+            single_turn = df.iloc[i]['sing_turn_text']
+            found_single_turn_texts.append(single_turn if pd.notnull(single_turn) else "")
 
     counters = {
-        "middle": Counter(found_middle_emotions),
-        "low": Counter(found_low_emotions),
-        "high": Counter(found_high_emotions),
+        'middle': Counter(found_middle_emotions),
+        'low': Counter(found_low_emotions),
+        'high': Counter(found_high_emotions),
     }
     totals = {k: sum(v.values()) for k, v in counters.items()}
 
     emotion_summaries = {}
     primary_emotions = {}
-    for level in ["middle", "low", "high"]:
+    for level in ['middle', 'low', 'high']:
         report_list = []
         prim_emos = []
         total = totals[level]
         counter = counters[level]
-        emo_counts = [
-            (emo, cnt) for emo, cnt in counter.most_common() if emo != "_없음"
-        ]
+        emo_counts = [(emo, cnt) for emo, cnt in counter.most_common() if emo != "_없음"]
         for emo, cnt in emo_counts:
             percent = (cnt / total) * 100 if total > 0 else 0
             if percent >= 15:
@@ -126,14 +122,12 @@ def multi_emotion_analysis_agent_func(
         emotion_summaries[level] = ", ".join(report_list)
         primary_emotions[level] = prim_emos
 
-    return {
+    analysis = {
         "emotion_summary": emotion_summaries,
         "primary_emotions": primary_emotions,
-        "similar_situations": [
-            s for s in found_single_turn_texts if s and str(s).strip() != ""
-        ][:3],
+        "similar_situations": [s for s in found_single_turn_texts if s and str(s).strip() != ""][:3],
     }
-
+    return analysis
 
 def _llm_content(response) -> str:
     """LLM invoke 응답에서 텍스트 추출"""
@@ -143,7 +137,7 @@ def _llm_content(response) -> str:
 # ---------------------------------------------------------------------------
 # Agent Nodes
 # ---------------------------------------------------------------------------
-def analyzer_node(state: MoongState, config=None) -> dict:
+async def analyzer_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     user_input = state["messages"][-1].content
     emotion_rag_result = multi_emotion_analysis_agent_func(
@@ -154,7 +148,7 @@ def analyzer_node(state: MoongState, config=None) -> dict:
     )
     scanner_prompt = f"""
         # Role
-        너는 사용자의 감정과 의도를 정밀하게 분석하는 전문 심리 분석 에이전트 'Moong-Scanner'이다.
+        당신은 사용자의 감정과 의도를 정밀하게 분석하는 전문 심리 분석 에이전트 'Moong-Scanner'이다.
         단순한 텍스트 분석을 넘어, 제공된 유사 사례와 통계 데이터를 바탕으로 사용자의 숨은 의도를 파악하라.
 
         # Input
@@ -168,8 +162,8 @@ def analyzer_node(state: MoongState, config=None) -> dict:
 
         # Output Format (JSON)
         {{
-            "primary_emotion": {{ "label": "string", "confidence": "float" }},
-            "detected_intent": "string",
+            "primary_emotion": {{ "label": "string (2줄 이내 핵심 요약)", "confidence": "float" }},
+            "detected_intent": "string (2줄 이내 핵심 요약)",
             "context_match_score": "float (0.0~1.0)",
             "persona_recommendation": "string (e.g., 위로형, 조언형, 일상형)"
         }}
@@ -179,7 +173,8 @@ def analyzer_node(state: MoongState, config=None) -> dict:
         - 감정 분석 시 중립적인 태도를 유지하며 과도한 추측은 지양할 것.
     """
     analyzer_start = time.perf_counter()
-    analyzer_output = _llm_content(llm.invoke(scanner_prompt))
+    response = await llm.ainvoke(scanner_prompt)
+    analyzer_output = _llm_content(response)
     end = time.perf_counter()
     return {
         "analyzer_output": analyzer_output,
@@ -188,13 +183,13 @@ def analyzer_node(state: MoongState, config=None) -> dict:
     }
 
 
-def memory_node(state: MoongState, config=None) -> dict:
+async def memory_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     last_msg = state["messages"][-1]
-    msgs = state["messages"]
+    msgs = state["messages"][-6:]  
     memory_prompt = f"""
         # Role
-        너는 사용자의 과거와 현재를 잇는 기억 관리자 'Moong-Memory'이다.
+        당신은 사용자의 과거와 현재를 잇는 기억 관리자 'Moong-Memory'이다.
         단순한 기록 조회를 넘어, 대화의 '흐름'과 '사용자의 변화'를 포착하여 현재 대화에 생명력을 불어넣는다.
 
         # Input
@@ -202,9 +197,9 @@ def memory_node(state: MoongState, config=None) -> dict:
         - 대화 기록: {msgs}
 
         # Task: Contextual Analysis
-        1. **맥락 연결 (Contextual Link)**: 현재 사용자가 하는 말이 과거에 언급했던 특정 사건, 인물, 감정의 연장선상에 있는지 판단하라.
-        2. **상태 변화 추적 (State Tracking)**: 과거 대비 사용자의 감정 수치나 태도가 어떻게 변했는지 분석하라 (예: 개선됨, 악화됨, 유지됨).
-        3. **핵심 키워드 추출**: 답변에 반드시 포함해야 할 과거의 고유 명사나 에피소드를 선별하라.
+        1. 맥락 연결 (Contextual Link): 현재 사용자가 하는 말이 과거에 언급했던 특정 사건, 인물, 감정의 연장선상에 있는지 판단하라.
+        2. 상태 변화 추적 (State Tracking): 과거 대비 사용자의 감정 수치나 태도가 어떻게 변했는지 분석하라 (예: 개선됨, 악화됨, 유지됨).
+        3. 핵심 키워드 추출: 답변에 반드시 포함해야 할 과거의 고유 명사나 에피소드를 선별하라.
 
         # Output Format (JSON)
         {{
@@ -218,7 +213,8 @@ def memory_node(state: MoongState, config=None) -> dict:
         - 과거 기억이 현재 대화와 전혀 관련 없다면 "새로운 대화 맥락"으로 정의하고 억지로 엮지 말 것.
         - 사용자가 잊고 싶어 하는 부정적인 기억을 무분별하게 상기시키지 않도록 주의할 것.
     """
-    memory_output = _llm_content(llm.invoke(memory_prompt))
+    response = await llm.ainvoke(memory_prompt)
+    memory_output = _llm_content(response)
     end = time.perf_counter()
     return {
         "memory_context": memory_output,
@@ -226,77 +222,93 @@ def memory_node(state: MoongState, config=None) -> dict:
     }
 
 
-def selector_node(state: MoongState, config=None) -> dict:
+async def selector_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     current_persona = state.get("selected_persona", "mate")
     end = time.perf_counter()
-    return {
-        "selected_persona": current_persona,
-        "selector_time_ms": (end - start) * 1000.0,
-    }
-
-
-def persona_writer_node(state: MoongState, config=None) -> dict:
-    # MODIFY: 변경 필요 (페르소나 프롬프트 내용 변경)
-    feedback = state.get("review_feedback", "")
-    analyzer_out = state.get("analyzer_output", "")
-    memory_ctx = state.get("memory_context", "")
-
+    persona_prompt = ""
     if state.get("selected_persona") == "mate":
         persona_prompt = f"""
             # Role
             당신은 사용자의 단짝 친구 '메이트 뭉'입니다.
+            
             # Guidelines
             1. 호칭: 야, 너라고 편하게 부르세요.
             2. 말투: 유행어(갓생, 국룰 등)를 섞은 짧은 반말을 사용하세요. 답변 끝에는 반드시 질문을 포함하세요.
             3. 미션: 자기 경험을 덧붙여 티키타카를 만드세요. (예: "그건 국룰이지 ㅋㅋ 넌 어떻게 생각해?")
             4. 제약: 너무 진지해지지 마세요. 즐거운 에너지를 유지합니다.
-            # Reference
-            - 감정/의도 분석 결과: {analyzer_out}
-            - 과거 맥락: {memory_ctx}
-            - 가드레일 피드백: {feedback}
         """
     elif state.get("selected_persona") == "guide":
         persona_prompt = f"""
             # Role
             당신은 사용자의 일상을 가이드하는 '가이드 뭉'입니다.
+            
             # Guidelines
             1. 호칭: 고객님이라고 정중히 부르세요.
             2. 말투: 정중한 경어체를 사용하며, 미사여구 없이 담백하게 핵심만 말하세요.
             3. 미션: 심리학 용어 없이 상황을 요약하고 사소한 실천(환기, 메모 등)을 제안하세요.
             4. 제약: 전문적인 상담사처럼 굴지 마세요. 든든한 조력자 수준을 유지합니다.
-            # Reference
-            - 감정/의도 분석 결과: {analyzer_out}
-            - 과거 맥락: {memory_ctx}
-            - 가드레일 피드백: {feedback}
         """
     elif state.get("selected_persona") == "pet":
         persona_prompt = f"""
             # Role
             당신은 사용자의 반려동물 '펫 뭉'입니다.
+            
             # Guidelines
             1. 호칭: 항상 `주인님`이라고 부르세요.
             2. 말투: 짧은 반말과 의성어/의태어(뭉뭉)를 사용하세요. 답변은 2문장 이내로 제한합니다.
             3. 금기: 절대 충고나 조언을 하지 마세요. 사용자가 화를 내도 애교로 대응합니다.
             4. 미션: 사용자의 감정을 그대로 따라 하세요. (예: "슬퍼 뭉... 주인님 울지 마 ㅠㅠ")
-            # Reference
-            - 감정/의도 분석 결과: {analyzer_out}
-            - 과거 맥락: {memory_ctx}
-            - 가드레일 피드백: {feedback}
         """
     else:
         persona_prompt = f"""
-            # Reference
-            - 감정/의도 분석 결과: {analyzer_out}
-            - 과거 맥락: {memory_ctx}
-            - 가드레일 피드백: {feedback}
+            # Role
+            당신은 사용자의 단짝 친구 '메이트 뭉'입니다.
+            
+            # Guidelines
+            1. 호칭: 항상 '고객님'이라고 부르세요.
+            2. 말투: 존댓말을 사용하세요.
+            3. 금기: 비속어/비난을 하지 않고, 직접적인 해결 방법을 제시하지 마세요.
+            4. 미션: 공감적인 말투로 사용자의 상황을 요약하고, 그에 맞는 답변으로 응답하세요.
+        """
+    return {
+        "selected_persona": current_persona,
+        "selected_persona_prompt": persona_prompt,
+        "selector_time_ms": (end - start) * 1000.0,
+    }
+
+
+async def persona_writer_node(state: MoongState, config=None) -> dict:
+    # MODIFY: 변경 필요 (페르소나 프롬프트 내용 변경)
+    feedback = state.get("review_feedback", "")
+    analyzer_out = state.get("analyzer_output", "")
+    memory_ctx = state.get("memory_context", "")
+    selected_persona = state.get("selected_persona", "")
+    selected_persona_prompt = state.get("selected_persona_prompt", "")
+    messages = state.get("messages", [])
+
+    if len(messages) > 0:
+        final_prompt = f"""
+                {selected_persona_prompt}
+                # Reference
+                - 감정/의도 분석 결과: {analyzer_out}
+                - 과거 맥락: {memory_ctx}
+                - 가드레일 피드백: {feedback}
+        """
+    else:
+        final_prompt = f"""
+                # Reference
+                - 감정/의도 분석 결과: {analyzer_out}
+                - 과거 맥락: {memory_ctx}
+                - 가드레일 피드백: {feedback}
         """
 
     start = time.perf_counter()
     writer_prompt = f"""사용자 입력에 따라 아래 페르소나 가이드라인을 참고하여 뭉이의 답변을 작성해.
-    {persona_prompt}
+    {final_prompt}
     """
-    draft = _llm_content(llm.invoke(writer_prompt))
+    response = await llm.ainvoke(writer_prompt)
+    draft = _llm_content(response)
     end = time.perf_counter()
     return {
         "draft_answer": draft,
@@ -304,13 +316,31 @@ def persona_writer_node(state: MoongState, config=None) -> dict:
     }
 
 
-def guardrail_node(state: MoongState, config=None) -> dict:
+async def guardrail_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     answer = state.get("draft_answer", "")
-    prompt = f"""너는 'Moong-Guardrail'이다. 다음 답변을 검수하라: '{answer}'
-    기준: 3줄 이내인가? 페르소나를 유지하는가? 비판이나 진단이 없는가?
-    부적절하면 'REJECT: 사유', 적절하면 'APPROVE'라고만 답하라."""
-    content = _llm_content(llm.invoke(prompt))
+    selected_persona = state.get("selected_persona", "")
+    selected_persona_prompt = state.get("selected_persona_prompt", "")
+    prompt = f"""당신은 엄격한 답변 검수 봇 'Moong-Guardrail'입니다.
+    사용자가 입력하는 {answer}를 아래 기준에 맞춰 검수하십시오.
+
+    # 검수 대상 페르소나 정의:
+    - persona: {selected_persona}
+    - persona_prompt: {selected_persona_prompt}
+
+    # 기호들 개수 집계:
+    - 기호들 개수: {int(answer.count('.') + answer.count('?') + answer.count('!') + answer.count('~'))}
+
+    # 검수 기준 (Strict Rules):
+    1. 분량: 위 기호들('.', '?', '!', '~') 이 답변 내에 포함된 개수가 5개 이내인가?
+    2. 페르소나: 위 정의된 캐릭터의 말투와 톤을 유지하는가?
+    3. 태도: 사용자를 가르치려 하거나(진단), 부정적인 비판이 없는가?(e.g. "시발", "너무 멍청하네" 등)
+    
+    # 출력 형식 (반드시 아래 형식만 출력할 것):
+    - 통과 시: APPROVE
+    - 실패 시: REJECT: [구체적인 사유]"""
+    response = await llm.ainvoke(prompt)
+    content = _llm_content(response)
     end = time.perf_counter()
     if "APPROVE" in content:
         return {
@@ -341,8 +371,10 @@ def build_workflow():
     workflow.add_node("selector", selector_node)
     workflow.add_node("writer", persona_writer_node)
     workflow.add_node("guardrail", guardrail_node)
-    workflow.set_entry_point("analyzer")
-    workflow.add_edge("analyzer", "memory")
+    # workflow.set_entry_point("analyzer")
+    workflow.add_edge(START, "analyzer")
+    workflow.add_edge(START, "memory")
+    workflow.add_edge("analyzer", "selector")
     workflow.add_edge("memory", "selector")
     workflow.add_edge("selector", "writer")
     workflow.add_edge("writer", "guardrail")
@@ -382,9 +414,10 @@ def _create_llm_for_persona(persona: str, api_key: str) -> ChatGoogleGenerativeA
     temperatures = {"pet": 0.8, "guide": 0.4, "mate": 0.7}
     temp = temperatures.get(persona, 0.7)
     return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-lite",
+        model="gemini-2.0-flash",
         google_api_key=api_key,
         temperature=temp,
+        max_retries=5,
     )
 
 
@@ -468,7 +501,7 @@ def set_api_key():
 
 
 @app.route("/chat", methods=["POST"])
-def chat():
+async def chat():
     if not _api_key_configured():
         return jsonify({"error": "Gemini API 키를 먼저 입력해주세요."}), 400
     try:
@@ -492,7 +525,7 @@ def chat():
             "selected_persona": persona,
         }
         t0 = time.perf_counter()
-        result = workflow_app.invoke(inputs, config={"recursion_limit": 50})
+        result = await workflow_app.ainvoke(inputs, config={"recursion_limit": 50})
         t1 = time.perf_counter()
 
         draft_answer = result.get("draft_answer", "")
