@@ -140,7 +140,8 @@ def _llm_content(response) -> str:
 async def analyzer_node(state: MoongState, config=None) -> dict:
     start = time.perf_counter()
     user_input = state["messages"][-1].content
-    emotion_rag_result = multi_emotion_analysis_agent_func(
+    emotion_rag_result = await asyncio.to_thread(
+        multi_emotion_analysis_agent_func,
         user_input=user_input,
         sbert_model=sbert_model,
         index=index,
@@ -322,7 +323,8 @@ async def guardrail_node(state: MoongState, config=None) -> dict:
     selected_persona = state.get("selected_persona", "")
     selected_persona_prompt = state.get("selected_persona_prompt", "")
     prompt = f"""당신은 엄격한 답변 검수 봇 'Moong-Guardrail'입니다.
-    사용자가 입력하는 {answer}를 아래 기준에 맞춰 검수하십시오.
+    사용자가 입력한 내용에 대한 답변을 아래 기준에 맞춰 검수하십시오.
+    - 사용자 답변: {answer}
 
     # 검수 대상 페르소나 정의:
     - persona: {selected_persona}
@@ -564,7 +566,6 @@ async def chat():
         })
     except Exception as e:
         return jsonify({"error": f"오류가 발생했습니다: {str(e)}"}), 500
-
 
 @app.route("/reset", methods=["POST"])
 def reset_chat():
