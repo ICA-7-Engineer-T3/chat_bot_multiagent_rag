@@ -1,6 +1,7 @@
-# 뭉이 멀티에이전트 챗봇 — 가이드
+# 뭉이 멀티에이전트 챗봇 (chat_bot_multiagent_rag)
 
-Flask 기반 **뭉이(Moong)** 멀티에이전트 챗봇의 알고리즘 개요, 환경 설정, 실행 방법을 정리한 문서입니다.
+Flask 기반 **뭉이(Moong)** 멀티에이전트 챗봇입니다.  
+Router → (Analyzer / Memory) → Selector → Writer → Guardrail 파이프라인으로 동작하며, RAG 기반 감정 분석과 페르소나별 답변 생성, GUI에서 에이전트별 결과·실행 시간을 확인할 수 있습니다.
 
 ---
 
@@ -8,43 +9,35 @@ Flask 기반 **뭉이(Moong)** 멀티에이전트 챗봇의 알고리즘 개요,
 
 ### 1.1 전체 구조
 
-챗봇은 **5단계 에이전트 파이프라인**으로 동작합니다.  
-한 번의 사용자 메시지가 들어오면 아래 순서로 처리된 뒤 최종 답변이 생성됩니다.
+한 번의 사용자 메시지는 **Router**에서 분류된 뒤, 필요에 따라 Analyzer·Memory를 거쳐 Selector → Writer → Guardrail 순으로 처리됩니다.
 
 ```
-[사용자 입력] → Analyzer → Memory → Selector → Writer → Guardrail → [답변 or 재작성]
-                                                    ↑_______________|
-                                                    (REJECT 시 Writer로 재진입)
+[사용자 입력] → Router → ┬─ (단순) → Selector → Writer → Guardrail → [답변 or 재작성]
+                         └─ (복잡) → Analyzer and/or Memory → Selector → Writer → Guardrail
+                                                                    ↑___________|
+                                                                    (REJECT 시 Writer 재진입)
 ```
 
-- **LangGraph**로 상태 그래프(StateGraph)를 정의하고, 각 단계를 노드로 연결합니다.
-- **Gemini**(Google Generative AI)를 LLM으로 사용합니다.
-- **RAG(Retrieval-Augmented Generation)**로 감정 대화 DB에서 유사 사례를 검색해 분석에 활용합니다.
+- **LangGraph**로 StateGraph를 정의하고, 비동기 노드(`ainvoke`)로 워크플로 실행.
+- **LLM**: OpenRouter API (`google/gemini-2.0-flash-lite-001`) 사용. API 키는 웹에서 입력하거나 `GEMINI_API_KEY` 환경 변수로 지정.
+- **RAG**: SentenceTransformer + FAISS로 감정 대화 DB에서 유사 사례 검색 후 Analyzer에 전달.
 
-### 1.2 각 에이전트 역할
+### 1.2 에이전트 역할
 
-| 단계 | 에이전트명 | 역할 |
-|------|------------|------|
-| **Analyzer** | Moong-Scanner | 사용자 입력 + RAG 유사 대화 데이터로 **감정·의도 분석**. 감정 벡터, 숨은 니즈, 페르소나 추천을 JSON 형태로 출력. |
-| **Memory** | Moong-Memory | **대화 기록**을 보고 맥락 연결, 감정 추이, 필수 사실을 정리. 새 이슈 vs 이전 대화 연장 여부 판단. |
-| **Selector** | — | 사용자가 선택한 **페르소나**(mate / guide / pet)를 상태에 유지. |
-| **Writer** | Moong (뭉) | Analyzer·Memory 결과와 페르소나에 맞춰 **답변 초안** 작성. (mate=친구형, guide=멘탈코치형, pet=강아지형) |
-| **Guardrail** | Moong-Guardrail | 답변을 **검수**(3줄 이내, 페르소나 유지, 비판/진단 없음). 적절하면 `APPROVE`, 부적절하면 `REJECT` + 사유 반환 → Writer로 재진입. |
+| 단계 | 에이전트 | 역할 |
+|------|----------|------|
+| **Router** | Moong-Router | 입력이 단순(인사/리액션)인지, 감정·의도 분석(`needs_analyzer`)·과거 맥락(`needs_memory`)이 필요한지 JSON으로 분류. |
+| **Analyzer** | Moong-Scanner | RAG 유사 대화 데이터 + 사용자 입력으로 감정·의도 분석, 페르소나 추천(JSON). |
+| **Memory** | Moong-Memory | 최근 대화 기록으로 맥락 연결, 감정 추이, 필수 사실 정리(JSON). |
+| **Selector** | — | 사용자가 선택한 페르소나(mate / guide / pet)와 해당 페르소나 프롬프트를 상태에 설정. |
+| **Writer** | Moong | Analyzer·Memory 결과와 페르소나 가이드라인으로 답변 초안 작성. |
+| **Guardrail** | Moong-Guardrail | 분량·페르소나 유지·비판/진단 여부 검수. `APPROVE` / `REJECT`(사유) → REJECT 시 Writer로 재진입. |
 
 ### 1.3 RAG(감정 유사도 검색)
 
 - **입력**: 사용자 발화 한 문장.
-- **처리**:
-  1. **SentenceTransformer** (`jhgan/ko-sroberta-multitask`)로 문장 임베딩 생성.
-  2. **FAISS** 인덱스에서 Top-K(기본 30) 유사 대화 검색.
-  3. 검색된 행의 `emotion_middle_class`, `emotion_low_class`, `emotion_high_class`, `sing_turn_text`를 집계.
-  4. 감정 비율(15% 이상만 요약), 주요 감정, 유사 상황 문장 3개를 정리해 Analyzer에 전달.
-- **데이터**: 프로젝트의 `DBs/` 폴더에 있는 SQLite DB(`dialogues` 테이블) + 임베딩(`.npy`) + FAISS 인덱스(`.faiss`)를 상대 경로로 참조합니다.
-
-### 1.4 상태(State)와 워크플로
-
-- **MoongState**: `messages`, `analyzer_output`, `analyzer_rag_result`, `memory_context`, `selected_persona`, `draft_answer`, `guardrail_status`, `review_feedback` 등.
-- Guardrail에서 **REJECT**이면 Writer로만 돌아가고, **APPROVE**이면 워크플로 종료 후 해당 `draft_answer`가 사용자에게 전달됩니다.
+- **처리**: SentenceTransformer(`jhgan/ko-sroberta-multitask`)로 임베딩 → FAISS 인덱스에서 Top-K(30) 유사 대화 검색 → 감정 요약·주요 감정·유사 상황 3건을 Analyzer에 전달.
+- **데이터**: SQLite `dialogues` 테이블(컬럼: `emotion_middle_class`, `emotion_low_class`, `emotion_high_class`, `sing_turn_text`)과 미리 구축한 FAISS 인덱스. 경로는 `DBs/` 폴더 기준 상대 경로 사용.
 
 ---
 
@@ -53,59 +46,36 @@ Flask 기반 **뭉이(Moong)** 멀티에이전트 챗봇의 알고리즘 개요,
 ### 2.1 필요 사항
 
 - **Python**: 3.10 이상 권장
-- **Gemini API 키**: [Google AI Studio](https://aistudio.google.com/)에서 발급
-- **RAG용 데이터**: 프로젝트 루트의 **`DBs`** 폴더에 아래 세 파일을 두면 **상대 경로**로 자동 참조됩니다.
-  - `DBs/total_data.db` — SQLite DB (`dialogues` 테이블, 컬럼: `emotion_middle_class`, `emotion_low_class`, `emotion_high_class`, `sing_turn_text`)
-  - `DBs/faiss_embeddings.npy` — 임베딩 배열
-  - `DBs/faiss_index.faiss` — FAISS 인덱스
+- **API 키**: OpenRouter API 키 ([OpenRouter](https://openrouter.ai/)에서 발급). 웹 UI에서 입력하거나 `GEMINI_API_KEY` 환경 변수에 설정.
+- **RAG 데이터**: `DBs/` 폴더에 다음 파일 배치 시 상대 경로로 자동 참조.
+  - `DBs/dialogues_lite.db` — SQLite DB (`dialogues` 테이블)
+  - `DBs/faiss_index_pq.faiss` — FAISS 인덱스
 
-### 2.2 프로젝트 클론/이동
-
-```bash
-cd c:\chat_bot_multiagent_rag
-```
-
-### 2.3 (권장) conda로 가상환경 생성 및 활성화
-
-- Python 버전은 **3.10 이상** 권장을 참고하세요.
-
-**1) conda 가상환경 생성**
+### 2.2 패키지 설치
 
 ```bash
-conda create -n moong-chatbot python=3.10
-```
-
-**2) 가상환경 활성화**
-
-```bash
-conda activate moong-chatbot
-```
-
-**3) requirements.txt로 패키지 설치**
-
-```bash
+cd chat_bot_multiagent_rag
 pip install -r requirements.txt
 ```
 
-> ⚠️ conda 환경에서는 `requirements.txt`의 모든 패키지가 pip로 설치됨을 확인하세요. 만약 특정 패키지(faiss 등) 설치 시 오류가 날 경우, [faiss 공식 conda 패키지](https://anaconda.org/conda-forge/faiss-cpu) 등을 먼저 설치해 주세요:
-> 
-> ```bash
-> conda install -c conda-forge faiss-cpu
-> pip install -r requirements.txt
-> ```
+`requirements.txt`에 포함된 패키지:
 
-### 2.4 패키지 설치
+- **Flask** — 웹 서버, 라우트, 세션
+- **faiss-cpu** — RAG 유사도 검색
+- **numpy**, **pandas** — 벡터·DB 조회
+- **langchain-google-genai**, **langchain-openai** — LLM (OpenRouter는 langchain-openai 사용)
+- **langchain-core** — 메시지 타입 등
+- **langgraph** — StateGraph, 워크플로
+- **sentence-transformers** — 한국어 임베딩 모델
 
-```bash
-pip install -r requirements.txt
-```
+### 2.3 환경 변수 (선택)
 
-### 2.5 환경 변수
-- **기본 동작**: 위 세 경로는 **설정하지 않으면** `main.py`가 있는 디렉터리 기준 **`DBs/`** 폴더를 참조합니다. `DBs` 안에 `total_data.db`, `faiss_embeddings.npy`, `faiss_index.faiss`를 두면 별도 설정 없이 동작합니다.
-
-    **⚠️ 반드시 아래 구글 드라이브 링크에서 `DBs/total_data.db`, `DBs/faiss_embeddings.npy`, `DBs/faiss_index.faiss` 3개 파일을 직접 다운로드하여 프로젝트 루트의 `DBs` 폴더에 동일한 경로로 넣어야 챗봇이 정상 동작합니다. (필수!)**
-
-    [구글 드라이브 링크](https://drive.google.com/drive/folders/1NzStTWnWqYXXVd7RBsS4cn1SO6chQ8Pj?usp=sharing)
+| 변수 | 설명 | 기본값 |
+|------|------|--------|
+| `GEMINI_API_KEY` | OpenRouter(또는 사용 중인 API) 키. 미설정 시 웹에서 입력 | — |
+| `FLASK_SECRET_KEY` | Flask 세션 암호화 | `moong-multiagent-secret-change-in-production` |
+| `MOONG_DB_PATH` | 대화 DB SQLite 경로 | `DBs/dialogues_lite.db` (상대 경로) |
+| `MOONG_FAISS_INDEX_PATH` | FAISS 인덱스 경로 | `DBs/faiss_index_pq.faiss` (상대 경로) |
 
 ---
 
@@ -117,27 +87,41 @@ pip install -r requirements.txt
 python main.py
 ```
 
-- 콘솔에 `Flask 서버 시작 (챗봇 + 에이전트 분석 GUI) http://0.0.0.0:5000` 및 포트 안내가 나옵니다.
-- 실제 리스닝 포트는 코드 기준 **5000** (`app.run(..., port=5000)`).
+- 콘솔에 `Flask 서버 시작 (챗봇 + 에이전트 분석 GUI) http://0.0.0.0:5000` 출력.
+- 포트 **5000**에서 동작.
 
-### 3.2 브라우저에서 접속
+### 3.2 브라우저 접속
 
-- 주소: **http://localhost:5000** (같은 PC) 또는 **http://0.0.0.0:5000**
-- 첫 화면에서 API 키가 설정되지 않았으면 **Gemini API 키**를 입력한 뒤, 챗봇과 대화할 수 있습니다.
-- 페르소나(mate / guide / pet) 선택 후 메시지를 보내면, Analyzer·Memory·Writer·Guardrail 등 에이전트 결과를 GUI에서 확인할 수 있습니다.
+- **http://localhost:5000** 접속.
+- API 키 미설정 시 첫 화면에서 API 키 입력 후 챗봇 사용.
+- 페르소나(mate / guide / pet) 선택 후 메시지 전송 → 채팅 + 오른쪽 패널에서 에이전트별 분석 결과·실행 시간 확인.
 
-### 3.3 API 키 없이 실행했을 때
-- `GEMINI_API_KEY`를 넣지 않으면, 실행 후 웹 UI에서 API 키를 입력해야 챗봇이 동작합니다.
-- 서버는 정상 기동되며, 웹에서 API 키를 입력하면 그 시점에 LLM·워크플로가 초기화됩니다.
-- DB/FAISS/임베딩은 **첫 채팅 시** 또는 API 키 설정 시 한 번만 로드됩니다.
+### 3.3 API 키 없이 실행 시
+
+- 서버는 기동되며, 웹에서 API 키를 입력하면 그 시점에 LLM·워크플로가 초기화됩니다.
+- DB·FAISS·SentenceTransformer는 API 키 설정 또는 첫 채팅 시 1회 로드됩니다.
 
 ---
 
-## 4. 요약
+## 4. API 요약
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| GET | `/` | 채팅 GUI (moong_multiagent_chat.html) |
+| GET | `/config` | API 키 설정 여부 (`api_key_configured`) |
+| POST | `/api-key` | API 키 등록 및 모델 초기화 |
+| POST | `/chat` | 메시지·페르소나 전달 → 답변 + 에이전트 결과 JSON |
+| POST | `/reset` | 대화·에이전트 결과 세션 초기화 |
+| GET | `/history` | 현재 대화·마지막 에이전트 결과 |
+
+---
+
+## 5. 요약
 
 | 항목 | 내용 |
 |------|------|
-| **알고리즘** | Analyzer → Memory → Selector → Writer → Guardrail 5단계 멀티에이전트 + RAG(FAISS + 한국어 SBERT) |
-| **RAG 데이터** | `DBs/total_data.db`, `DBs/faiss_embeddings.npy`, `DBs/faiss_index.faiss` (상대 경로, 환경 변수로 덮어쓰기 가능) |
-| **환경** | Python 3.10+, `pip install -r requirements.txt`, (선택) 환경 변수로 API 키·경로 설정 |
-| **실행** | `python main.py` 후 브라우저에서 `http://localhost:5000` 접속 |
+| **알고리즘** | Router → (Analyzer / Memory) → Selector → Writer → Guardrail, RAG(FAISS + ko-sroberta-multitask) |
+| **LLM** | OpenRouter `google/gemini-2.0-flash-lite-001`, 페르소나별 temperature(mate 0.7, guide 0.4, pet 0.8) |
+| **RAG 데이터** | `DBs/dialogues_lite.db`, `DBs/faiss_index_pq.faiss` (상대 경로) |
+| **환경** | Python 3.10+, `pip install -r requirements.txt` |
+| **실행** | `python main.py` → 브라우저에서 `http://localhost:5000` |
