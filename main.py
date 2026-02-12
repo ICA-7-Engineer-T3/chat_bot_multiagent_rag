@@ -5,6 +5,7 @@
 import os
 import sys
 import time
+import json
 import asyncio
 import sqlite3
 import pandas as pd
@@ -14,6 +15,7 @@ from collections import Counter
 from typing import Annotated, List, Literal, Optional, TypedDict
 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, START, END
@@ -53,6 +55,9 @@ workflow_app = None
 # ---------------------------------------------------------------------------
 class MoongState(TypedDict, total=False):
     messages: Annotated[List[BaseMessage], add_messages]
+    is_simple: bool       # 인사/리액션 등 단순 대화 여부
+    needs_analyzer: bool  # 감정/의도 분석 필요 여부 (RAG 포함)
+    needs_memory: bool    # 과거 맥락/기록 조회 필요 여부
     analyzer_output: str
     analyzer_rag_result: dict
     memory_context: str
@@ -62,12 +67,78 @@ class MoongState(TypedDict, total=False):
     guardrail_status: Literal["APPROVE", "REJECT"]
     review_feedback: str
     # 각 에이전트별 실행 시간 (ms)
+    router_time_ms: float
     analyzer_time_ms: float
     memory_time_ms: float
     selector_time_ms: float
     writer_time_ms: float
     guardrail_time_ms: float
 
+# ---------------------------------------------------------------------------
+# 2. Router Node (Classifier)
+# ---------------------------------------------------------------------------
+async def router_node(state: MoongState, config=None) -> dict:
+    start = time.perf_counter()
+    user_input = state["messages"][-1].content
+
+    router_prompt = f"""
+    당신은 대화의 복잡도를 판단하는 'Moong-Router'입니다.
+    사용자 입력: "{user_input}"
+
+    다음 기준에 따라 JSON으로만 답변하세요:
+    1. is_simple: 인사, 감사, 단순 리액션(ㅋㅋ, 오호), 종료 등 정밀 분석이 필요 없는 경우 true.
+    2. needs_analyzer: 감정(기쁨/슬픔/분노 등), 구체적 의도, 심리 분석이 필요한 경우 true.
+    3. needs_memory: "저번에", "그때", "기억나?" 등 과거 정보를 언급하거나 기존 맥락이 필수인 경우 true.
+
+    # Output Format (JSON)
+    {{
+      "is_simple": bool,
+      "needs_analyzer": bool,
+      "needs_memory": bool
+    }}
+    """
+    response = await llm.ainvoke(router_prompt, config={"max_tokens": 50})
+    output_text = _llm_content(response)
+
+    try:
+        # 1. LLM 응답에서 마크다운 태그(```json)가 섞여 나올 경우를 대비해 클렌징합니다.
+        clean_json = output_text.strip().replace("```json", "").replace("```", "")
+        # 2. 문자열을 파이썬 딕셔너리로 변환 (핵심!)
+        res_dict = json.loads(clean_json)
+    except Exception as e:
+        # 파싱 실패 시 기본값 설정 (안전하게 모든 분석을 수행하도록 설정)
+        res_dict = {"is_simple": False, "needs_analyzer": True, "needs_memory": False}
+
+    end = time.perf_counter()
+    
+    # 이제 res_dict는 딕셔너리이므로 .get() 사용이 가능합니다.
+    return {
+        "is_simple": bool(res_dict.get("is_simple", False)),
+        "needs_analyzer": bool(res_dict.get("needs_analyzer", False)),
+        "needs_memory": bool(res_dict.get("needs_memory", False)),
+        "router_time_ms": (end - start) * 1000.0
+    }
+
+# ---------------------------------------------------------------------------
+# 3. 라우팅 로직 (Conditional Edge)
+# ---------------------------------------------------------------------------
+def route_to_agents(state: MoongState):
+    """
+    반환값은 반드시 '매핑 딕셔너리의 키'들이 담긴 리스트여야 합니다.
+    """
+    if state.get("is_simple"):
+        return ["selector"] # 'selector'라는 키를 반환
+
+    targets = []
+    if state.get("needs_analyzer"):
+        targets.append("analyzer") # 'analyzer'라는 키를 추가
+    if state.get("needs_memory"):
+        targets.append("memory")   # 'memory'라는 키를 추가
+        
+    if not targets:
+        return ["selector"]
+        
+    return targets
 
 # ---------------------------------------------------------------------------
 # RAG 도구 (노트북과 동일)
@@ -174,7 +245,7 @@ async def analyzer_node(state: MoongState, config=None) -> dict:
         - 감정 분석 시 중립적인 태도를 유지하며 과도한 추측은 지양할 것.
     """
     analyzer_start = time.perf_counter()
-    response = await llm.ainvoke(scanner_prompt)
+    response = await llm.ainvoke(scanner_prompt, config={"max_tokens": 400})
     analyzer_output = _llm_content(response)
     end = time.perf_counter()
     return {
@@ -214,7 +285,7 @@ async def memory_node(state: MoongState, config=None) -> dict:
         - 과거 기억이 현재 대화와 전혀 관련 없다면 "새로운 대화 맥락"으로 정의하고 억지로 엮지 말 것.
         - 사용자가 잊고 싶어 하는 부정적인 기억을 무분별하게 상기시키지 않도록 주의할 것.
     """
-    response = await llm.ainvoke(memory_prompt)
+    response = await llm.ainvoke(memory_prompt, config={"max_tokens": 250})
     memory_output = _llm_content(response)
     end = time.perf_counter()
     return {
@@ -288,6 +359,7 @@ async def persona_writer_node(state: MoongState, config=None) -> dict:
     selected_persona_prompt = state.get("selected_persona_prompt", "")
     messages = state.get("messages", [])
 
+    # 첫 입력 또는 5턴마다 페르소나 프롬프트를 주입
     if len(messages) > 0:
         final_prompt = f"""
                 {selected_persona_prompt}
@@ -308,7 +380,7 @@ async def persona_writer_node(state: MoongState, config=None) -> dict:
     writer_prompt = f"""사용자 입력에 따라 아래 페르소나 가이드라인을 참고하여 뭉이의 답변을 작성해.
     {final_prompt}
     """
-    response = await llm.ainvoke(writer_prompt)
+    response = await llm.ainvoke(writer_prompt, config={"max_tokens": 650})
     draft = _llm_content(response)
     end = time.perf_counter()
     return {
@@ -334,14 +406,14 @@ async def guardrail_node(state: MoongState, config=None) -> dict:
     - 기호들 개수: {int(answer.count('.') + answer.count('?') + answer.count('!') + answer.count('~'))}
 
     # 검수 기준 (Strict Rules):
-    1. 분량: 위 기호들('.', '?', '!', '~') 이 답변 내에 포함된 개수가 5개 이내인가?
+    1. 분량: 위 기호들('.', '?', '!', '~') 이 답변 내에 포함된 개수가 10개 이내인가?
     2. 페르소나: 위 정의된 캐릭터의 말투와 톤을 유지하는가?
     3. 태도: 사용자를 가르치려 하거나(진단), 부정적인 비판이 없는가?(e.g. "시발", "너무 멍청하네" 등)
     
     # 출력 형식 (반드시 아래 형식만 출력할 것):
     - 통과 시: APPROVE
     - 실패 시: REJECT: [구체적인 사유]"""
-    response = await llm.ainvoke(prompt)
+    response = await llm.ainvoke(prompt, config={"max_tokens": 100})
     content = _llm_content(response)
     end = time.perf_counter()
     if "APPROVE" in content:
@@ -368,21 +440,42 @@ def guardrail_condition(state: MoongState):
 def build_workflow():
     global workflow_app
     workflow = StateGraph(MoongState)
+    workflow.add_node("router", router_node)
     workflow.add_node("analyzer", analyzer_node)
     workflow.add_node("memory", memory_node)
     workflow.add_node("selector", selector_node)
     workflow.add_node("writer", persona_writer_node)
     workflow.add_node("guardrail", guardrail_node)
-    # workflow.set_entry_point("analyzer")
-    workflow.add_edge(START, "analyzer")
-    workflow.add_edge(START, "memory")
+    
+    # 1단계: 라우터 실행
+    workflow.add_edge(START, "router")
+
+    # 2단계: 조건부 분기 (이 부분이 핵심입니다)
+    workflow.add_conditional_edges(
+        "router",
+        route_to_agents,
+        {
+            "selector": "selector", # Fast Track (Simple)
+            "analyzer": "analyzer", # 병렬 경로 1
+            "memory": "memory"      # 병렬 경로 2
+        }
+    )
+
+    # 3단계: 분석 노드들은 완료 후 Selector로 집결
     workflow.add_edge("analyzer", "selector")
     workflow.add_edge("memory", "selector")
+
+    # 4단계: 공통 후속 절차
     workflow.add_edge("selector", "writer")
     workflow.add_edge("writer", "guardrail")
+
+    # 가드레일 통과 여부에 따른 조건부 루프
     workflow.add_conditional_edges(
-        "guardrail", guardrail_condition, {"refine": "writer", "end": END}
+        "guardrail", 
+        guardrail_condition, 
+        {"refine": "writer", "end": END}
     )
+
     workflow_app = workflow.compile()
 
 
@@ -410,18 +503,28 @@ def _ensure_heavy_resources_loaded():
 
 
 # ---------------------------------------------------------------------------
-# MODIFY: 변경 필요 (페르소나에 맞는 temperature로 LLM 생성)
-def _create_llm_for_persona(persona: str, api_key: str) -> ChatGoogleGenerativeAI:
+def _create_llm_for_persona(persona: str, api_key: str) -> ChatOpenAI:
     """선택한 페르소나에 맞는 temperature로 LLM 생성."""
     temperatures = {"pet": 0.8, "guide": 0.4, "mate": 0.7}
     temp = temperatures.get(persona, 0.7)
-    return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=api_key,
+    # return ChatGoogleGenerativeAI(
+    #     model="gemini-2.0-flash-lite",
+    #     google_api_key=api_key,
+    #     temperature=temp,
+    #     max_retries=3,
+    # )
+    return ChatOpenAI(
+        model="google/gemini-2.0-flash-lite-001",
+        openai_api_key=api_key,                 # OpenRouter에서 받은 Key (sk-or-...)
+        openai_api_base="https://openrouter.ai/api/v1",  # [핵심] OpenRouter 주소
         temperature=temp,
-        max_retries=5,
+        max_retries=3,
+        # (선택) OpenRouter 랭킹용 헤더
+        default_headers={
+            "HTTP-Referer": "http://localhost:5000",
+            "X-Title": "Moong Chatbot"
+        }
     )
-
 
 def _set_llm_for_persona(persona: str) -> None:
     """현재 설정된 API 키로 페르소나에 맞는 LLM을 전역 llm에 설정."""

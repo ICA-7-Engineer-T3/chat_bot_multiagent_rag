@@ -1,4 +1,5 @@
 .key
+*.ipynb
 # Python
 venv/
 __pycache__/
